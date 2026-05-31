@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS, os: macos-14 }
+          - { name: Linux, os: ubuntu-22.04 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # JUCE GUI/audio backends on Linux need the X11 / ALSA / GL dev headers.
+      # Web browser + cURL are compiled out (JUCE_WEB_BROWSER=0, JUCE_USE_CURL=0),
+      # so webkit/curl dev packages are intentionally omitted. xvfb gives the
+      # headless test exe a display to construct the editor against.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libjack-jackd2-dev \
+            libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxext-dev libxrender-dev \
+            libxcomposite-dev libxcursor-dev libxinerama-dev libxrandr-dev \
+            libglu1-mesa-dev mesa-common-dev \
+            xvfb
+
+      # Cache the FetchContent-cloned JUCE so CI doesn't re-clone it each run.
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-8.0.13-${{ runner.os }}
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DMIST_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        if: runner.os == 'macOS'
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Test (headless)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ctest --test-dir build --output-on-failure -C Release

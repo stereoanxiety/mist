@@ -1,0 +1,146 @@
+name: Release
+
+# Build the plugin on macOS / Windows / Linux and attach per-OS zips
+# (VST3 + AU + CLAP) to the GitHub Release for the pushed tag.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write          # needed to upload assets to the release
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS,   os: macos-14 }
+          - { name: Windows, os: windows-2022 }
+          - { name: Linux,   os: ubuntu-22.04 }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # tag push: build that tag. Manual dispatch: build the requested tag.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libjack-jackd2-dev \
+            libfreetype6-dev libfontconfig1-dev \
+            libx11-dev libxext-dev libxrender-dev \
+            libxcomposite-dev libxcursor-dev libxinerama-dev libxrandr-dev \
+            libglu1-mesa-dev mesa-common-dev
+
+      # Cache the FetchContent-cloned JUCE + clap-juce-extensions between runs.
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure (macOS — universal)
+        if: runner.os == 'macOS'
+        run: >
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+          -DMIST_BUILD_TESTS=OFF -DMIST_COPY_AFTER_BUILD=OFF
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
+      - name: Configure (Windows / Linux)
+        if: runner.os != 'macOS'
+        run: >
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+          -DMIST_BUILD_TESTS=OFF -DMIST_COPY_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          A=build/Mist_artefacts/Release
+          D=dist/Mist-macOS
+          mkdir -p "$D"
+          cp -R "$A/VST3/Mist.vst3"     "$D/"
+          cp -R "$A/AU/Mist.component"  "$D/"
+          cp -R "$A/CLAP/Mist.clap"     "$D/"
+          cat > "$D/INSTALL.txt" <<'EOF'
+          Mist — macOS install
+
+          Copy into your user plugin folders:
+            Mist.vst3       -> ~/Library/Audio/Plug-Ins/VST3/
+            Mist.component  -> ~/Library/Audio/Plug-Ins/Components/   (AU)
+            Mist.clap       -> ~/Library/Audio/Plug-Ins/CLAP/
+
+          These builds are NOT code-signed. macOS Gatekeeper may block them
+          ("unidentified developer" / "damaged"). To clear the quarantine flag,
+          run in Terminal after copying:
+
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Mist.vst3
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Mist.component
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/CLAP/Mist.clap
+
+          Then rescan plugins in your DAW.
+          EOF
+          ( cd dist && zip -ry Mist-macOS.zip Mist-macOS )
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          A=build/Mist_artefacts/Release
+          D=dist/Mist-Linux
+          mkdir -p "$D"
+          cp -R "$A/VST3/Mist.vst3"  "$D/"
+          cp -R "$A/CLAP/Mist.clap"  "$D/"
+          cat > "$D/INSTALL.txt" <<'EOF'
+          Mist — Linux install
+
+          Copy into your user plugin folders:
+            Mist.vst3  -> ~/.vst3/
+            Mist.clap  -> ~/.clap/
+
+          Then rescan plugins in your DAW.
+          EOF
+          ( cd dist && zip -ry Mist-Linux.zip Mist-Linux )
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $A = "build/Mist_artefacts/Release"
+          $D = "dist/Mist-Windows"
+          New-Item -ItemType Directory -Force -Path $D | Out-Null
+          Copy-Item -Recurse "$A/VST3/Mist.vst3" $D/
+          Copy-Item -Recurse "$A/CLAP/Mist.clap" $D/
+          @"
+          Mist — Windows install
+
+          Copy into your plugin folders:
+            Mist.vst3  -> %COMMONPROGRAMFILES%\VST3\   (usually C:\Program Files\Common Files\VST3)
+            Mist.clap  -> %COMMONPROGRAMFILES%\CLAP\
+
+          Then rescan plugins in your DAW.
+          "@ | Out-File -Encoding utf8 "$D/INSTALL.txt"
+          Compress-Archive -Path "$D/*" -DestinationPath dist/Mist-Windows.zip
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*.zip
+          fail_on_unmatched_files: true

@@ -1,0 +1,22 @@
+# Build output
+/build/
+build/
+cmake-build-*/
+
+# clangd / compile DB (symlink points into build/)
+/compile_commands.json
+.cache/
+.clangd/
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj
+*.xcworkspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# JUCE generated
+JuceLibraryCode/
